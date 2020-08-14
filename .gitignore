@@ -48,6 +48,8 @@ local.properties
 .settings/
 .loadpath
 .recommenders
+.project
+.classpath
 
 # External tool builders
 .externalToolBuilders/
@@ -246,3 +248,6 @@ fabric.properties
 .idea
 
 arangodb-spring-data.iml
+
+/docker/jwtHeader
+/docker/jwtSecret

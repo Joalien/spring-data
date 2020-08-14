@@ -20,25 +20,22 @@
 
 package com.arangodb.springframework.core.convert;
 
-import java.lang.annotation.Annotation;
-import java.lang.reflect.Array;
-import java.math.BigDecimal;
-import java.math.BigInteger;
-import java.sql.Timestamp;
-import java.text.ParseException;
-import java.time.Instant;
-import java.time.LocalDate;
-import java.time.LocalDateTime;
-import java.time.OffsetDateTime;
-import java.time.ZonedDateTime;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.Date;
-import java.util.Iterator;
-import java.util.Map;
-import java.util.Map.Entry;
-import java.util.Optional;
-
+import com.arangodb.entity.BaseDocument;
+import com.arangodb.entity.BaseEdgeDocument;
+import com.arangodb.springframework.annotation.*;
+import com.arangodb.springframework.core.convert.resolver.LazyLoadingProxy;
+import com.arangodb.springframework.core.convert.resolver.ReferenceResolver;
+import com.arangodb.springframework.core.convert.resolver.RelationResolver;
+import com.arangodb.springframework.core.convert.resolver.ResolverFactory;
+import com.arangodb.springframework.core.mapping.ArangoPersistentEntity;
+import com.arangodb.springframework.core.mapping.ArangoPersistentProperty;
+import com.arangodb.springframework.core.mapping.ArangoSimpleTypes;
+import com.arangodb.springframework.core.util.MetadataUtils;
+import com.arangodb.velocypack.VPackBuilder;
+import com.arangodb.velocypack.VPackSlice;
+import com.arangodb.velocypack.ValueType;
+import com.arangodb.velocypack.internal.util.DateUtil;
+import com.arangodb.velocypack.module.jdk8.internal.util.JavaTimeUtil;
 import org.springframework.core.CollectionFactory;
 import org.springframework.core.convert.support.DefaultConversionService;
 import org.springframework.core.convert.support.GenericConversionService;
@@ -58,27 +55,15 @@ import org.springframework.util.Base64Utils;
 import org.springframework.util.ClassUtils;
 import org.springframework.util.CollectionUtils;
 
-import com.arangodb.entity.BaseDocument;
-import com.arangodb.entity.BaseEdgeDocument;
-import com.arangodb.springframework.annotation.Document;
-import com.arangodb.springframework.annotation.Edge;
-import com.arangodb.springframework.annotation.From;
-import com.arangodb.springframework.annotation.Ref;
-import com.arangodb.springframework.annotation.Relations;
-import com.arangodb.springframework.annotation.To;
-import com.arangodb.springframework.core.convert.resolver.LazyLoadingProxy;
-import com.arangodb.springframework.core.convert.resolver.ReferenceResolver;
-import com.arangodb.springframework.core.convert.resolver.RelationResolver;
-import com.arangodb.springframework.core.convert.resolver.ResolverFactory;
-import com.arangodb.springframework.core.mapping.ArangoPersistentEntity;
-import com.arangodb.springframework.core.mapping.ArangoPersistentProperty;
-import com.arangodb.springframework.core.mapping.ArangoSimpleTypes;
-import com.arangodb.springframework.core.util.MetadataUtils;
-import com.arangodb.velocypack.VPackBuilder;
-import com.arangodb.velocypack.VPackSlice;
-import com.arangodb.velocypack.ValueType;
-import com.arangodb.velocypack.internal.util.DateUtil;
-import com.arangodb.velocypack.module.jdk8.internal.util.JavaTimeUtil;
+import java.lang.annotation.Annotation;
+import java.lang.reflect.Array;
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.sql.Timestamp;
+import java.text.ParseException;
+import java.time.*;
+import java.util.*;
+import java.util.Map.Entry;
 
 /**
  * @author Mark Vollmary
@@ -290,7 +275,7 @@ public class DefaultArangoConverter implements ArangoConverter {
 		return map;
 	}
 
-	private Object readCollection(final TypeInformation<?> type, final VPackSlice source) {
+	private Collection<?> readCollection(final TypeInformation<?> type, final VPackSlice source) {
 		if (!source.isArray()) {
 			throw new MappingException(
 					String.format("Can't read collection type %s from VPack type %s!", type, source.getType()));
@@ -298,8 +283,10 @@ public class DefaultArangoConverter implements ArangoConverter {
 
 		final TypeInformation<?> componentType = getNonNullComponentType(type);
 		final Class<?> collectionType = Iterable.class.equals(type.getType()) ? Collection.class : type.getType();
-		final Collection<Object> collection = CollectionFactory.createCollection(collectionType,
-			componentType.getType(), source.getLength());
+
+		final Collection<Object> collection = Collection.class == collectionType || List.class == collectionType ?
+				new ArrayList<>(source.getLength()) :
+				CollectionFactory.createCollection(collectionType, componentType.getType(), source.getLength());
 
 		final Iterator<VPackSlice> iterator = source.arrayIterator();
 
@@ -670,9 +657,9 @@ public class DefaultArangoConverter implements ArangoConverter {
 
 		if (property.getRef().isPresent()) {
 			if (sourceType.isCollectionLike()) {
-				writeReferences(fieldName, source, sink);
+				writeReferences(fieldName, source, sink,property.getRef().get());
 			} else {
-				writeReference(fieldName, source, sink);
+				writeReference(fieldName, source, sink,property.getRef().get());
 			}
 		}
 
@@ -682,7 +669,7 @@ public class DefaultArangoConverter implements ArangoConverter {
 
 		else if (property.getFrom().isPresent() || property.getTo().isPresent()) {
 			if (!sourceType.isCollectionLike()) {
-				writeReference(fieldName, source, sink);
+				writeReference(fieldName, source, sink, null);
 			}
 		}
 
@@ -704,7 +691,10 @@ public class DefaultArangoConverter implements ArangoConverter {
 			final Object key = entry.getKey();
 			final Object value = entry.getValue();
 
-			writeInternal(convertId(key), value, sink, getNonNullMapValueType(definedType));
+			String convertedKey = convertId(key);
+			if (value != null) {
+				writeInternal(convertedKey, value, sink, getNonNullMapValueType(definedType));
+			}
 		}
 
 		sink.close();
@@ -719,7 +709,11 @@ public class DefaultArangoConverter implements ArangoConverter {
 		sink.add(attribute, ValueType.ARRAY);
 
 		for (final Object entry : asCollection(source)) {
-			writeInternal(null, entry, sink, getNonNullComponentType(definedType));
+			if (entry == null) {
+				writeSimple(null, null, sink);
+			} else {
+				writeInternal(null, entry, sink, getNonNullComponentType(definedType));
+			}
 		}
 
 		sink.close();
@@ -739,33 +733,37 @@ public class DefaultArangoConverter implements ArangoConverter {
 			sink.add(attribute, ValueType.ARRAY);
 			for (int i = 0; i < Array.getLength(source); ++i) {
 				final Object element = Array.get(source, i);
-				writeInternal(null, element, sink, getNonNullComponentType(definedType));
+				if (element == null) {
+					writeSimple(null, null, sink);
+				} else {
+					writeInternal(null, element, sink, getNonNullComponentType(definedType));
+				}
 			}
 			sink.close();
 		}
 	}
 
-	private void writeReferences(final String attribute, final Object source, final VPackBuilder sink) {
+	private void writeReferences(final String attribute, final Object source, final VPackBuilder sink, final Ref annotation) {
 		sink.add(attribute, ValueType.ARRAY);
 
 		if (source.getClass().isArray()) {
 			for (int i = 0; i < Array.getLength(source); ++i) {
 				final Object element = Array.get(source, i);
-				writeReference(null, element, sink);
+				writeReference(null, element, sink,annotation);
 			}
 		}
 
 		else {
 			for (final Object element : asCollection(source)) {
-				writeReference(null, element, sink);
+				writeReference(null, element, sink,annotation);
 			}
 		}
 
 		sink.close();
 	}
 
-	private void writeReference(final String attribute, final Object source, final VPackBuilder sink) {
-		getRefId(source).ifPresent(id -> sink.add(attribute, id));
+	private void writeReference(final String attribute, final Object source, final VPackBuilder sink, final Ref annotation) {
+		getRefId(source, annotation).ifPresent(id -> sink.add(attribute, id));
 	}
 
 	@SuppressWarnings("unchecked")
@@ -880,18 +878,24 @@ public class DefaultArangoConverter implements ArangoConverter {
 		sink.add(attribute, builder.slice());
 	}
 
-	private Optional<String> getRefId(final Object source) {
-		return getRefId(source, context.getPersistentEntity(source.getClass()));
+	private Optional<String> getRefId(final Object source, final Ref annotation) {
+		return getRefId(source, context.getPersistentEntity(source.getClass()),annotation);
 	}
 
-	private Optional<String> getRefId(final Object source, final ArangoPersistentEntity<?> entity) {
+	private Optional<String> getRefId(final Object source, final ArangoPersistentEntity<?> entity, final Ref annotation) {
 		if (source instanceof LazyLoadingProxy) {
 			return Optional.of(((LazyLoadingProxy) source).getRefId());
 		}
 
 		final Optional<Object> id = Optional.ofNullable(entity.getIdentifierAccessor(source).getIdentifier());
 		if (id.isPresent()) {
-			return id.map(key -> MetadataUtils.createIdFromCollectionAndKey(entity.getCollection(), convertId(key)));
+			if(annotation != null){
+				final Optional<ReferenceResolver<Annotation>> resolver = resolverFactory.getReferenceResolver(annotation);
+				return id.map(key -> resolver.get().write(source, entity, convertId(key),annotation));
+			} else {
+				return id.map(key -> MetadataUtils.createIdFromCollectionAndKey(entity.getCollection(), convertId(key)));
+			}
+
 		}
 
 		return Optional.ofNullable((String) entity.getArangoIdAccessor(source).getIdentifier());
